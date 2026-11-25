@@ -33,6 +33,9 @@ s = s[:i] + '\npython3 "%{SOURCE9999}" "%{_topdir}/kait2en-generated.patch"\n\n'
 p.write_text(s)
 PY
 dnf5 -y builddep "$srpm"
+# The binary build evaluates conditional BPF dependencies that the SRPM
+# metadata does not include. Keep Fedora's BPF feature enabled.
+dnf5 -y install bpftool libbpf-devel
 # Preserve the stock NVR for this experiment so the existing i686 libnm
 # remains compatible. Only the daemon and Wi-Fi plugin will be installed.
 cd "$root/out/original"
