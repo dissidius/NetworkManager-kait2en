@@ -1,0 +1,30 @@
+name: Fedora 45 NetworkManager RPM
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/build-fedora.yml'
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:45
+    timeout-minutes: 90
+    steps:
+      - name: Install build tooling
+        run: dnf5 -y install git rpm-build dnf5-plugins python3 findutils diffutils
+      - uses: actions/checkout@v4
+      - name: Build matching Fedora packages
+        shell: bash
+        run: bash scripts/build.sh
+      - name: Upload build output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fedora45-networkmanager-experimental
+          path: out/
+          if-no-files-found: warn
