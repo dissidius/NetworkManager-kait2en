@@ -18,9 +18,12 @@ from pathlib import Path
 p = Path(sys.argv[1])
 s = p.read_text()
 assert not re.search(r"(?im)^Source9999\s*:", s)
-s, n = re.subn(r"(?im)^(Release\s*:[^\n]+)$",
-               r"\1\nSource9999: kait2en-apply-quirk.py", s, count=1)
-assert n == 1
+# RPM assigns implicit Source: numbers in declaration order. Keep
+# the original source archive at index 0 and append the helper afterward.
+sources = list(re.finditer(r"(?im)^[ \t]*Source(?:[0-9]+)?[ \t]*:[^\n]+", s))
+assert sources, "No Fedora source declarations found"
+i = sources[-1].end()
+s = s[:i] + "\nSource9999: kait2en-apply-quirk.py" + s[i:]
 prep = re.search(r"(?m)^%prep\s*$", s)
 assert prep
 end = re.search(r"(?m)^%(?:build|generate_buildrequires|install|check|package|description|files|clean|changelog)\b", s[prep.end():])
