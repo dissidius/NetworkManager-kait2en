@@ -1,0 +1,182 @@
+#!/usr/bin/python3
+"""Opt-in same-channel companion for an existing NM AP profile (no secrets)."""
+import argparse
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+W = "802-11-wireless."
+ENV = dict(os.environ, LC_ALL="C")
+PRIMARY = os.getenv("KAI_PRIMARY", "wlp5s0")
+AP = os.getenv("KAI_AP", "ap0")
+PROFILE = os.getenv("KAI_PROFILE", "Hotspot-Concurrent")
+DRY = False
+
+
+def run(*args, check=True, mutate=False):
+    if mutate and DRY:
+        print("Would run:", " ".join(args))
+        return ""
+    p = subprocess.run(args, text=True, capture_output=True, env=ENV, timeout=35)
+    if p.returncode and check:
+        raise RuntimeError(f"{args[0]} {args[1]}: {p.stderr.strip()}")
+    return p.stdout.strip() if p.returncode == 0 else ""
+
+
+def nm(*args, **kw):
+    return run("nmcli", "--wait", "25", *args, **kw)
+
+
+def prop(uuid, name):
+    return nm("-g", name, "connection", "show", "uuid", uuid)
+
+
+def parse_info(s):
+    phy = re.search(r"^\s*wiphy\s+(\d+)", s, re.M)
+    mode = re.search(r"^\s*type\s+(\S+)", s, re.M)
+    channel = re.search(r"channel (\d+) \((\d+) MHz\), width: (\d+) MHz", s)
+    if not phy or not mode:
+        raise RuntimeError("Cannot identify wireless interface")
+    return (int(phy[1]), mode[1], tuple(map(int, channel.groups())) if channel else None)
+
+
+def target(channel):
+    """Conservative SCC policy, not a regulatory authority.
+
+    Only conventional non-DFS 5 GHz channels and 2.4 GHz 1-11.
+    2.4 GHz intentionally uses 20 MHz; 5 GHz matches primary width.
+    """
+    if channel is None:
+        return None
+    ch, freq, width = channel
+    if 1 <= ch <= 11 and freq == 2407 + 5 * ch:
+        return "bg", ch, 20
+    if ch in (36, 40, 44, 48) and freq == 5000 + 5 * ch and width in (20, 40, 80):
+        return "a", ch, width
+    return None
+
+
+def regulatory_ok(phy, channel):
+    band, ch, width = channel
+    # Do not silently set a country or override firmware regulatory flags.
+    reg = run("iw", "reg", "get")
+    country = re.search(r"^country ([A-Z]{2}):", reg, re.M)
+    if not country or country[1] in ("00", "99"):
+        return False
+    # Check the primary and every constituent 20-MHz channel.
+    if band == "a" and width == 80:
+        channels = (36, 40, 44, 48)
+    elif band == "a" and width == 40:
+        channels = (36, 40) if ch in (36, 40) else (44, 48)
+    else:
+        channels = (ch,)
+    info = run("iw", "phy", f"phy{phy}", "info")
+    for c in channels:
+        f = (5000 if band == "a" else 2407) + 5 * c
+        line = next((x for x in info.splitlines() if re.search(
+            rf"\b{f}(?:\.0)? MHz \[{c}\]", x)), "")
+        if not line or re.search(r"disabled|no IR|no[- ]IR|radar detection|passive scan",
+                                 line, re.I):
+            return False
+    return True
+
+
+def active_interfaces():
+    lines = nm("-t", "-f", "UUID,DEVICE", "connection", "show", "--active")
+    return dict(line.split(":", 1) for line in lines.splitlines() if ":" in line)
+
+
+def reconcile():
+    if PRIMARY == AP or not all(re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", v)
+                               for v in (PRIMARY, AP)):
+        raise RuntimeError("Invalid interface configuration")
+    if not Path(f"/sys/class/net/{PRIMARY}").exists():
+        return
+    # Scope to the tested Apple Broadcom family, not arbitrary Wi-Fi hardware.
+    if nm("-g", "GENERAL.DRIVER", "device", "show", PRIMARY) != "brcmfmac":
+        raise RuntimeError("Primary is not brcmfmac")
+    device = Path(f"/sys/class/net/{PRIMARY}/device")
+    if (device / "subsystem_vendor").read_text().strip() != "0x106b":
+        raise RuntimeError("Primary is not an Apple PCI wireless device")
+    if (device / "device").read_text().strip() != "0x4464":
+        raise RuntimeError("Only BCM4364 (PCI 14e4:4464) is supported in v0.1")
+    phy, mode, chan = parse_info(run("iw", "dev", PRIMARY, "info"))
+    if mode != "managed":
+        return  # Never disturb the original primary-interface hotspot.
+    # Respect global Wi-Fi disabled and the user's radio controls.
+    if nm("radio", "wifi") != "enabled":
+        return
+    uuid = nm("-g", "connection.uuid", "connection", "show", "id", PROFILE,
+              check=False)
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", uuid):
+        raise RuntimeError("Create/select exactly one dedicated AP profile first")
+    for field, expected in (("connection.interface-name", AP), (W+"mode", "ap"),
+                            (W+"cloned-mac-address", "preserve"),
+                            ("ipv4.method", "shared"),
+                            ("connection.autoconnect", "no")):
+        if prop(uuid, field) != expected:
+            raise RuntimeError(f"Dedicated AP profile must set {field}={expected}")
+    active = active_interfaces()
+    if uuid in active and active[uuid] != AP:
+        raise RuntimeError("Dedicated profile is active on another interface")
+    if any(v == AP and k != uuid for k, v in active.items()):
+        return  # No interference with user-controlled profiles.
+    is_active = active.get(uuid) == AP
+    if not Path(f"/sys/class/net/{AP}").exists():
+        run("iw", "dev", PRIMARY, "interface", "add", AP, "type", "__ap",
+            mutate=True)
+        if DRY:
+            return
+        # Do not reset MAC addresses, power settings or the primary interface.
+        run("ip", "link", "set", AP, "up", mutate=True)
+        nm("device", "set", AP, "managed", "yes", mutate=True)
+    ap_phy, ap_mode, ap_channel = parse_info(run("iw", "dev", AP, "info"))
+    if ap_phy != phy or ap_mode not in ("AP", "managed"):
+        raise RuntimeError("Existing interface is not a compatible virtual AP")
+    link = run("iw", "dev", PRIMARY, "link")
+    if not link.startswith("Connected to "):
+        return  # Standalone mode: keep user's profile/channel, no forced activation.
+    desired = target(chan)
+    if desired is None or not regulatory_ok(phy, desired):
+        if is_active:
+            nm("connection", "down", "uuid", uuid, mutate=True)
+        print("Uplink channel outside conservative SCC policy; no automatic AP restart")
+        return
+    band, ch, width = desired
+    saved = (prop(uuid, W+"band"), prop(uuid, W+"channel"),
+             prop(uuid, W+"channel-width"))
+    # nmcli prints either a number, a keyword or '80 (80mhz)'.
+    current = (saved[0], saved[1].split(" ")[0],
+               saved[2].split(" ")[0].removesuffix("mhz"))
+    if current == (band, str(ch), str(width)):
+        if is_active and target(ap_channel) != desired:
+            print("Profile matches but firmware channel does not; investigate manually")
+        return
+    # Only restart the explicitly selected active profile. An inactive AP
+    # remains inactive; GNOME or nmcli controls its on/off state.
+    if is_active:
+        nm("connection", "down", "uuid", uuid, mutate=True)
+    nm("connection", "modify", "uuid", uuid, W+"band", band, W+"channel", str(ch),
+       W+"channel-width", f"{width}mhz", mutate=True)
+    if is_active:
+        nm("connection", "up", "uuid", uuid, "ifname", AP, mutate=True)
+    print(f"Dedicated AP synchronized: {band} channel {ch}, {width} MHz")
+
+
+def main():
+    global DRY
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--dry-run", action="store_true")
+    DRY = p.parse_args().dry_run
+    try:
+        reconcile()
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
+        print(f"kait2en-wifi: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

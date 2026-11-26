@@ -1,0 +1,38 @@
+name: Fedora 45 Wi-Fi Companion
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'companion/**'
+      - '.github/workflows/build-companion.yml'
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:45
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tooling
+        run: dnf5 -y install rpm-build python3 systemd-rpm-macros tar gzip
+      - name: Build and test companion
+        shell: bash
+        run: |
+          set -euxo pipefail
+          top="$PWD/work/companion"
+          mkdir -p "$top"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS} out
+          python3 -m py_compile companion/kait2en-wifi
+          python3 companion/test_policy.py
+          tar -czf "$top/SOURCES/kait2en-wifi-companion-0.1.0.tar.gz" --transform='s,^companion,kait2en-wifi-companion-0.1.0,' --exclude='__pycache__' companion
+          rpmbuild -ba --define "_topdir $top" companion/kait2en-wifi-companion.spec
+          cp "$top"/RPMS/noarch/*.rpm "$top"/SRPMS/*.rpm out/
+          cd out
+          sha256sum *.rpm > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fedora45-wifi-companion-experimental
+          path: out/
+          if-no-files-found: error

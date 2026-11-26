@@ -1,0 +1,10 @@
+[Unit]
+Description=KaiT2en Wi-Fi companion reconciliation
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/kait2en-wifi.conf
+ExecStart=/usr/libexec/kait2en-wifi
+TimeoutStartSec=120

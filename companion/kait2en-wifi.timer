@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep the dedicated KaiT2en hotspot synchronized
+
+[Timer]
+OnBootSec=20s
+OnUnitInactiveSec=15s
+AccuracySec=2s
+Unit=kait2en-wifi.service
+
+[Install]
+WantedBy=timers.target
