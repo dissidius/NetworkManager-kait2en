@@ -1,0 +1,38 @@
+name: Fedora 45 RSDB diagnostics
+on:
+  workflow_dispatch:
+  push:
+    branches: [research/mcc]
+    paths:
+      - 'research/instrument-rsdb.py'
+      - 'research/build-rsdb.sh'
+      - 'research/rsdb-install.sh'
+      - 'research/installed-patch-hashes.txt'
+      - '.github/workflows/build-rsdb.yml'
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:45
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build exact patched Wi-Fi modules
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p out
+          bash research/build-rsdb.sh 2>&1 | tee out/build.log
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: fedora45-rsdb-diagnostics-7.3.4-300
+          path: out/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: rsdb-build-failure-log
+          path: out/build.log
